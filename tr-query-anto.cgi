@@ -71,7 +71,7 @@ def html_generic_query_results_table(field_names, result_list, link_to,
 
     return doc
 
-def html_generic_query_results (query_info, arg=None):  
+def html_generic_query_results (query_info, arg=None):
     html = xml_utils ( )
     doc = ''
 
@@ -93,7 +93,7 @@ def html_generic_query_results (query_info, arg=None):
 
     field_names = q_result.listfields ( )
     result_list = q_result.getresult ( )
-    
+
     if (query_info.custom_table_function):
         doc += html.indent (
             query_info.custom_table_function (
@@ -147,11 +147,11 @@ def main (query_type, arg):
         doc += '<script type="text/javascript" src="/js/ixmaps.gm.js"></script>'
         #doc += '<link rel="stylesheet" href="/css/ix.css" type="text/css" />'
         #doc += '<link rel="stylesheet" href="/css/ix-explore.css" type="text/css" />'
-        
+
         doc += html.end_tag ("/head")
         doc += html.tag ("body")
         #doc += '<h1>testing...</h1>'
-        
+
         if not query_info.custom_page_function:
             doc += html.indent (html_generic_query_results (query_info, arg) )
         else:
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     # # --- Convert traceroute from string to int ---
     # if traceroute_id != None:
         # traceroute_id = int (traceroute_id)
-        
+
     # is_geek_mode_on = False if (form.getfirst ("geek") != "true" ) else True
 
     if not query_type:
@@ -190,5 +190,5 @@ if __name__ == "__main__":
     # if query_type:
     main (query_type, arg)
 
-    # else: 
-        # old_main (traceroute_id, submitter, zip_code, all_submitters, geek=is_geek_mode_on) 
+    # else:
+        # old_main (traceroute_id, submitter, zip_code, all_submitters, geek=is_geek_mode_on)
