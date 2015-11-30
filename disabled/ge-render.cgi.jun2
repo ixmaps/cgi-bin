@@ -1,0 +1,1188 @@
+#!/usr/bin/python
+
+"""
+Render a traceroute for display by Google Earth.
+"""
+DEBUG=False
+#FIXME  errors should never give a 2xx response
+#FIXME  program needs a major re-write 
+#FIXME  generate hop-styles on the fly
+
+import pg
+import time
+import cgi
+import math
+import string
+import cgitb; cgitb.enable()
+import sys
+
+# persuant to OPEN DATA LICENSE (GeoLite Country and GeoLite City databases)
+MAX_MIND_ATTRIBUTION="""
+  <br/><br/>
+This product includes GeoLite data created by MaxMind, available from
+<a href="http://maxmind.com/">http://maxmind.com/</a>
+"""
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+EARTH_EQUAT_RADIUS = 6378.145    # Equatorial radius in km
+EARTH_FLAT = 1.0/298.0           # ellipsoidal flattening at the poles
+EARTH_MEAN_RADIUS = EARTH_EQUAT_RADIUS * (1.0 - 0.5*EARTH_FLAT)
+
+URL_HOME = "http://dev.ixmaps.ischool.utoronto.ca/"
+# URL_HOME = "http://test.n-space.org/ixmaps/"
+
+def ll_to_xyz(lat, long):
+    lat_radians = math.pi * lat / 180.0
+    long_radians = math.pi * long / 180.0
+    x = EARTH_MEAN_RADIUS * math.cos(long_radians) * math.cos(lat_radians)
+    y = EARTH_MEAN_RADIUS * math.sin(long_radians) * math.cos(lat_radians)
+    z = EARTH_MEAN_RADIUS * math.sin(lat_radians)
+    return (x,y,z)
+
+def km_to_degrees(km, lat, scale=1.0):
+    deg_lat = scale*km*180.0/(EARTH_MEAN_RADIUS*math.pi)
+    deg_long = deg_lat / math.cos(math.pi*lat/180.0)
+    return (deg_lat, deg_long)
+
+def distance_km(pos1, pos2):
+    dx = pos2[0]-pos1[0]
+    dy = pos2[1]-pos1[1]
+    dz = pos2[2]-pos1[2]
+    return math.sqrt(dx*dx+dy*dy+dz*dz)
+
+def ll_line_to_km (ll1, ll2):
+    pos1 = ll_to_xyz (ll1[0], ll1[1])
+    pos2 = ll_to_xyz (ll2[0], ll2[1])
+    return distance_km (pos1, pos2)
+
+MILE_TO_KM = 1.609344
+
+# MAX_CHOTEL_DIST = EARTH_EQUAT_RADIUS * 2
+# MAX_CHOTEL_DIST = 3.0*MILE_TO_KM
+MAX_CHOTEL_DIST = 10.0*MILE_TO_KM
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+class TracerouteException(Exception):
+    pass
+
+class DBConnect(object):
+    conn = None
+    def getConnection():
+        if not DBConnect.conn:
+            DBConnect.conn = pg.connect("ixmaps", "localhost", 5432)
+        return DBConnect.conn
+    getConnection = staticmethod(getConnection)
+
+def get_traceroute(conn, id):
+    qres = conn.query("select * from traceroute where id=%d" % id)
+    try:
+        id = qres.dictresult()[0]['id']
+    except IndexError:
+        raise TracerouteException, "failed to find traceroute %d" % id
+    return qres.dictresult()[0]
+
+
+def get_tr_items(conn, id):
+    qres = conn.query("select * from tr_item where traceroute_id=%d" % id)
+    try:
+        id = qres.dictresult()[0]['traceroute_id']
+    except IndexError:
+        raise TracerouteException, "failed to find traceroute items for %d" % id
+    return qres.dictresult()
+
+def get_tr_items_dim(da):
+    """da is array of dicts, each dict representing a single traceroute probe"""
+    nhops = nattempts = 0
+    for d in da:
+        if d['attempt'] > nattempts:
+            nattempts = d['attempt']
+        if d['hop'] > nhops:
+            nhops = d['hop']
+    return (nhops, nattempts)
+
+
+def get_tr_item_count(conn, id):
+    qstr = "select count(*) from tr_item where traceroute_id=%d" % id
+    qres = conn.query(qstr)
+    ent = qres.dictresult()[0]
+    return ent['count']
+    
+def array_2d(rows, cols):
+    a=[None]*rows
+    for i in range(rows):
+        a[i] = [None]*cols
+    return a
+
+def get_ip_addr_info(conn, addr):
+    if addr:
+        qres = conn.query("select * from ip_addr_info where ip_addr='%s'" % addr)
+        d = qres.dictresult()[0]
+        d['lat'] = str(d['lat'])
+        d['long'] = str(d['long'])
+        d['asnum'] = str(d['asnum'])
+        d['country'] = str(d['mm_country'])
+        d['region'] = str(d['mm_region'])
+        d['city'] = str(d['mm_city'])
+        d['pcode'] = str(d['mm_postal'])
+        d['area_code'] = str(d['mm_area_code'])
+        d['dma_code'] = str(d['mm_dma_code'])
+        d['override'] = str(d['gl_override'])
+        d['certainty'] = str(d['gl_override'])        
+    else:
+        d={'lat': '', 'hostname': '', 'ip_addr': None, 'long': '', 'asnum': '',
+           'region': '', 'city': '', 'country': '', 'pcode': '', 'area_code': '', 'dma_code': '', 'override': '', 'certainty': ''}
+
+
+#    if d['override']:
+ #       d['country'] = 'Unknown'
+  #      d['region'] = ''
+   #     d['city'] = ''
+    #    d['pcode'] = ''
+     #   d['area_code'] = ''
+        
+    return d
+
+def get_complete_traceroute(conn, traceroute_id):
+    tr_header = get_traceroute(conn, traceroute_id)
+    tr_body = get_tr_items(conn, traceroute_id)
+    #print tr_body
+
+    # allocate and fill the address and rtt tables
+    (nhops, nattempts) = get_tr_items_dim(tr_body)   
+    #print nhops, nattempts
+    rtt = array_2d(nhops, nattempts)
+    ipaddrs = array_2d(nhops, nattempts)
+    for probe in tr_body:
+        hop = probe['hop']-1
+        attempt = probe['attempt']-1
+        rtt[hop][attempt] = probe['rtt_ms']
+        ipaddrs[hop][attempt] = probe['ip_addr']
+    return (tr_header, tr_body, nhops, nattempts, rtt, ipaddrs)
+
+def is_accurate_to (places, x):
+    X = x * math.pow (10, places)
+    if (int(X) % 10) != 0:
+        return True
+    else:
+        return False
+    
+
+class Proximities(object):
+    def __init__(self):
+        self.pa = []
+        self.reset()
+    def add(self, id, p1, p2):
+        self.pa.append((id, p1,p2))
+    def reset(self):
+        self.index = 0
+    def idExists(self, id):
+        retVal = False
+        for i in self.pa:
+            if i[0] == id:
+                retVal = True
+                break
+        return retVal
+    def __iter__(self):
+        return self
+    def next(self):
+        try:
+            item = self.pa[self.index]
+            self.index += 1
+            return item
+        except IndexError:
+            raise StopIteration
+
+def get_lat_long (hdesc):
+    if 'lat' in hdesc and 'long' in hdesc:
+        return (hdesc['lat'], hdesc['long'])
+
+def get_ch_networks(conn, ch):
+    if not ch.has_key('networks'):
+        qres = conn.query("select name from chnetwork join ch_networks on net_id = chnetwork.id where ch_id=%d" % ch['id'])
+        ch['networks'] = ','.join([d['name'] for d in qres.dictresult()])
+
+def get_ch_class(chotel):
+    """Determine styling class for a carrier hotel."""
+    if chotel['nsa'] == 'A': 
+        ixclass = 'NSA'
+    elif chotel['nsa'] == 'B':
+        ixclass = 'nearNSAposs'
+    elif chotel['nsa'] == 'C': # FIXME should have "chotel['type'] == 'NSA' and " for A, B, C, D
+        ixclass = 'nearNSAposs'
+    elif chotel['nsa'] == 'D':
+        ixclass = 'nearNSAposs'
+    elif chotel['nsa'] == 'X':
+        ixclass = 'CRG'
+    elif chotel['type'] == 'Google':
+	ixclass = 'AGF'
+ #   elif chotel['ch_build_owner'] == 'CoreSite':
+ #       ixclass = 'nearCRG'
+ #   elif chotel['id'] in [1,2,3]:  #FIXME: should be taken from the database
+ #       ixclass = 'CAN'
+    else:
+        ixclass = 'OTH'
+    return ixclass
+
+def URL_encode_ampersands(url):
+    return "&amp;".join(url.split("&"))
+        
+class CHotels(object):
+    def __init__(self, conn):
+        qres = conn.query("select * from chotel")  # FIXME should be "select * from chotel where type='CH'"? For different layers?
+        try:
+            id = qres.dictresult()[0]['id']
+        except IndexError:
+            raise TracerouteException, "failed to find any carrier hotels"
+        chotels = qres.dictresult()
+        for ch in chotels:
+            ch['xyz'] = ll_to_xyz(ch['lat'], ch['long'])
+            ch['to_render'] = False
+            ixclass = get_ch_class(ch)
+            ch['ixclass'] = string.replace(ixclass, "near", "", 1)
+            ch['facility'] = location_styles[ch['ixclass']]['facility']
+            ch['image_esc'] = URL_encode_ampersands(ch['image'])
+        self.chotels = chotels
+        self.reset()
+
+    def reset(self):
+        self.index = 0
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        try:
+            chotels = self.chotels
+            index = self.index
+            while not chotels[index]['to_render']:
+                index += 1
+            item = chotels[index]
+            index += 1
+            self.index = index
+            return item
+        except IndexError:
+            raise StopIteration
+
+    def nearest(self, longitude, latitude, km_radius=EARTH_EQUAT_RADIUS*2):
+        """Find the nearest carrier hotel that's within a given radius in km."""
+        point = ll_to_xyz(latitude, longitude)
+        max_dist = km_radius
+        chotel = None
+        for ch in self.chotels:
+            dist = distance_km(point, ch['xyz'])
+            if dist < max_dist:
+                #print ch['id'], ch['long'], ch['lat'], dist, max_dist
+                max_dist = dist
+                chotel = ch
+        return chotel
+        
+    def all_within (self, longitude, latitude, km_radius=EARTH_EQUAT_RADIUS*2, set_to_render=False):
+        """Create a list of carrier hotels within a given radius in km."""
+        point = ll_to_xyz(latitude, longitude)
+        chotel = None
+        chotel_tuple_list = []
+
+        # --- Create list of chotels within radius ---
+        for ch in self.chotels:
+            dist = distance_km(point, ch['xyz'])
+            if dist < km_radius:
+                chotel_tuple_list.append ((dist, ch))
+
+        # --- Sort chotels list ---
+        chotel_tuple_list.sort()
+
+        # --- Convert to non-tupple by removing distance meta-info ---
+        chotel_list = []
+        for ch in chotel_tuple_list:
+            chotel_list.append (ch[1])
+
+        # --- Set whether to render ---
+        for ch in chotel_list:
+            if set_to_render:
+                ch['networks'] = ''
+                ch['to_render'] = True
+
+        # print chotel_list
+
+        return chotel_list
+
+    def nsa (self, set_to_render=False):
+        """Get the NSA listening posts."""
+        chotel_list = []
+        for ch in self.chotels:
+            if ch['nsa']:
+                chotel_list.append(ch)
+
+        for ch in chotel_list:
+            if set_to_render:
+                ch['networks'] = ''
+                ch['to_render'] = True
+
+        return chotel_list
+
+    def CHlay (self, set_to_render=False):
+        """Get carrier hotels."""
+        chotel_list = []
+        for ch in self.chotels:
+            if ch['type']:
+                chotel_list.append(ch)
+
+        for ch in chotel_list:
+            if set_to_render:
+                ch['networks'] = ''
+                ch['to_render'] = True
+
+        return chotel_list
+
+
+hop_style="""
+  <Style id="%(id)s_nonsel">
+    <IconStyle>
+      <scale>%(nonhighlight)s</scale>
+      <Icon>
+        <href>""" + URL_HOME + """/ge/%(color)s22x16.png</href>
+      </Icon>
+    </IconStyle>
+    <LabelStyle>
+      <scale>0.8</scale>
+    </LabelStyle>
+    <BalloonStyle>
+      <text><![CDATA[<table border="0" width="305" cellspacing="0" cellpadding="0"><tr align="left" valign="top"><td width="100%%" align="left" valign="top"> <p><a href=\"""" + URL_HOME + """\"; title="IXmaps"><img src=\"""" + URL_HOME + """ge/ixmaps.png\" alt="" width="270" height="60"></a></p><p>%(facility)s</p> <p><strong>$[name]</strong></p>$[description]</td></tr></table>]]></text>
+    </BalloonStyle>
+  </Style>
+  <Style id="%(id)s_sel">
+    <IconStyle>
+      <scale>%(highlight)s</scale>
+      <Icon>
+        <href>""" + URL_HOME + """ge/%(color)s22x16.png</href>
+      </Icon>
+    </IconStyle>
+    <LabelStyle>
+      <scale>1.2</scale>
+    </LabelStyle>
+    <BalloonStyle>
+      <text><![CDATA[<table border="0" width="305" cellspacing="0" cellpadding="0"><tr align="left" valign="top"><td width="100%%" align="left" valign="top"> <p><a href=\"""" + URL_HOME + """\"; title="IXmaps"><img src=\"""" + URL_HOME + """ge/ixmaps.png\" alt="" width="270" height="60"></a></p><p>%(facility)s</p> <p><strong>$[name]</strong></p>$[description]</td></tr></table>]]></text>
+    </BalloonStyle>
+  </Style>
+  <StyleMap id="%(id)s">
+    <Pair>
+      <key>normal</key>
+       <styleUrl>#%(id)s_nonsel</styleUrl>
+    </Pair>
+    <Pair>
+      <key>highlight</key>
+      <styleUrl>#%(id)s_sel</styleUrl>
+    </Pair>
+  </StyleMap>
+
+<!-- /hop_style -->
+"""
+
+location_styles = {
+    'AGF'         : { 'id': 'AGF',         'color': 'green',  'facility': 'Google facility' },				# removed Apple for now
+    'nearAGF'     : { 'id': 'nearAGF',     'color': 'green',  'facility': 'Near an Apple or Google facility' },
+    'CAN'         : { 'id': 'CAN',         'color': 'locationcircle',  'facility': 'In Canada' },
+    'NSA'         : { 'id': 'NSA',         'color': 'nsa',    'facility': 'Known NSA listening post' },
+    'nearNSA'     : { 'id': 'nearNSA',     'color': 'nearnsa',    'facility': 'Near a known NSA listening post' },
+    'NSAposs'     : { 'id': 'NSAposs',     'color': 'nearnsa',    'facility': 'Suspected NSA listening post' },
+    'nearNSAposs' : { 'id': 'nearNSAposs', 'color': 'nearnsa',    'facility': 'Near a suspected NSA listening post' },
+    'CRG'         : { 'id': 'CRG',         'color': 'yellow', 'facility': 'Hey Colin' }, #temporarily being used for Cables layer
+    'nearCRG'     : { 'id': 'nearCRG',     'color': 'crg', 'facility': 'Near a facility owned by Carlyle Real Estate - CoreSite' },
+    'INT'         : { 'id': 'INT',         'color': 'locationcircle',     'facility': 'unknown' },
+    'OTH'         : { 'id': 'OTH',         'color': 'vibblue',     'facility': '' },  # other
+    # 'AGF'         : { 'id': 'AGF',         'color': 'green',  'facility': 'Apple or Google facility' },
+    # 'nearAGF'     : { 'id': 'nearAGF',     'color': 'green',  'facility': 'Near an Apple or Google facility' },
+    # 'CAN'         : { 'id': 'CAN',         'color': 'clear',     'facility': 'In Canada' },
+    # 'NSA'         : { 'id': 'NSA',         'color': 'red',    'facility': 'Known NSA listening post' },
+    # 'nearNSA'     : { 'id': 'nearNSA',     'color': 'red',    'facility': 'Near a known NSA listening post' },
+    # 'NSAposs'     : { 'id': 'NSAposs',     'color': 'red',    'facility': 'Suspected NSA listening post' },
+    # 'nearNSAposs' : { 'id': 'nearNSAposs', 'color': 'red',    'facility': 'Near a suspected NSA listening post' },
+    # 'CRG'         : { 'id': 'CRG',         'color': 'yellow', 'facility': 'Owned by Carlyle Real Estate - CoreSite' },
+    # 'nearCRG'     : { 'id': 'nearCRG',     'color': 'yellow', 'facility': 'Near a facility owned by Carlyle Real Estate - CoreSite' },
+    # 'INT'         : { 'id': 'INT',         'color': 'clear',     'facility': 'Non-US & -Canada' },
+    # 'OTH'         : { 'id': 'OTH',         'color': 'clear',     'facility': '' },  # other
+}
+
+def print_ch_style(ch):
+    facility = ''
+    if ch['facility']:
+        facility = "<p>%s</p>" % (ch['facility'] )
+
+    style = """   <Style id="ch_%(id)s_sel">
+  <IconStyle>
+      <scale>1.6</scale>
+      <Icon>
+        <href>%(image_esc)s</href>
+      </Icon>
+    </IconStyle>
+    <LabelStyle>
+      <scale>1.2</scale>
+    </LabelStyle>
+    <BalloonStyle>
+      <text><![CDATA[<table border="0" width="305" cellspacing="0" cellpadding="0"><tr align="left" valign="top"><td width="100%%" align="left" valign="top"> <p><a href=\"""" + URL_HOME + """\"; title="IXmaps"><img src=\"""" + URL_HOME + """ge/ixmaps.png\" alt="" width="270" height="60"></a></p>""" + facility + \
+    """<p><strong>$[name]</strong></p>$[description]</td></tr></table>]]></text>
+    </BalloonStyle>
+   </Style>"""
+
+    if ch['image_esc']:
+        shared = """  <StyleMap id="ch_%(id)s">
+    <Pair>
+       <key>normal</key>
+      <styleUrl>#%(ixclass)s_nonsel</styleUrl>
+    </Pair>
+    <Pair>
+    <key>highlight</key>
+      <styleUrl>#ch_%(id)s_sel</styleUrl>
+    </Pair>
+  </StyleMap>"""
+
+    else:
+        shared = """  <StyleMap id="ch_%(id)s">
+    <Pair>
+       <key>normal</key>
+      <styleUrl>#%(ixclass)s_nonsel</styleUrl>
+    </Pair>
+    <Pair>
+    <key>highlight</key>
+      <styleUrl>#%(ixclass)s_sel</styleUrl>
+    </Pair>
+  </StyleMap>"""
+
+
+    print style  % ch
+    print shared % ch
+
+def print_hop_styles():
+    for k in location_styles:
+        style = location_styles[k]
+
+        # --- Highlight only hops that are not near carrier hotels (so
+        #     as not to interfere  with the carrier-hotel picture ---
+        if style['color'] == 'nsa' or style['color'] == 'nearnsa':
+            style['nonhighlight'] = .8
+            style['highlight'] = .9
+        else:
+            style['nonhighlight'] = .8
+            style['highlight'] = .9
+
+        print hop_style % style
+
+kml_header="""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://earth.google.com/kml/2.1">
+<!-- <kml xmlns="http://www.opengis.net/kml/2.2"> -->
+<Document>
+  <Style id="docBalloonStyle">
+    <BalloonStyle>
+      <!-- a background color for the balloon -->
+      <bgColor>40ffffbb</bgColor>
+      <!-- styling of the balloon text -->
+      <text><![CDATA[
+      <b><font color="#CC0000" size="+3">$[name]</font></b>
+      <br/><br/>
+      <font face="Courier">$[description]</font>
+      <br/><br/>
+      ]]></text>
+    </BalloonStyle>
+  </Style>
+  <Style id="ixFolderStyle">
+  </Style>
+  <name>Traceroute Results</name>
+  <visibility>0</visibility>
+  <open>1</open>
+  <Document>
+    <name>Instructions</name>
+    <Snippet maxLines="0">Instructions</Snippet>
+    <description><![CDATA[
+<ul><li>Click on icons to see locations of Carrier Hotels</li>
+    <li>Click on location to see Carrier Hotel building</li>
+    <li>Mouse over center of building to see infrastructure</li>
+    </ul>"""+MAX_MIND_ATTRIBUTION+"""
+  ]]></description>
+    <styleUrl>#docBalloonStyle</styleUrl>
+  </Document>
+  <description>Select this folder and click on the &apos;Play&apos; button below, to start the tour.</description>
+  <Style id="trPathStyle">
+    <LineStyle>
+      <color>ff0028ff</color>
+      <width>4</width>
+    </LineStyle>
+  </Style>
+  <Style id="spiderStyle">
+    <LineStyle>
+      <color>7f7ca6e5</color>
+      <width>2</width>
+    </LineStyle>
+  </Style>
+<!-- /kml_header -->
+"""
+# (quote added to fix emacs-highlighter): "
+
+kml_camera="""
+    <Camera id="NorthAmerica">
+      <longitude>-96.0</longitude>
+      <latitude>45.0</latitude>
+      <altitude>4500000.0</altitude>
+      <heading>0.0</heading>
+      <tilt>0</tilt>
+      <roll>0</roll>
+      <altitudeMode>absolute</altitudeMode>
+    </Camera>
+    <!-- /kml_camera -->"""
+
+
+kml_trailer="""
+</Document>
+</kml>
+"""
+
+def get_available_hops(da):
+    hop = -1
+    for d in da:
+        try:
+            if d['hop'] > hop:
+                hop = d['hop']
+        except KeyError:
+            pass
+    return hop
+	
+def get_available_ip_addrs(da, nhops):
+    aa = [None] * nhops
+    for d in da:
+        try:
+            hop = d['hop']
+            addr = d['ip_addr']
+            aa[hop-1] = addr
+        except IndexError:
+            pass
+        except KeyError:
+            pass
+    return aa
+
+def get_rtts(da, hop, attempts):
+    """get Round Trip Times from a traceroute body.
+       
+       da is an array of dictionaries, each dictionary holding
+          the result from a single probe packet.
+       hop is the hop number we're looking for, starting at 1
+       attempts is the number of attempts made for each hop
+    """
+    rtts = [None] * attempts
+    for d in da:
+        try:
+            if d['hop'] == hop:
+                attempt = d['attempt']-1
+                rtts[attempt] = d['rtt_ms']
+        except IndexError:
+            pass
+        except KeyError:
+            pass
+    return rtts
+
+def show_spider(t):
+    (id, loc_to, loc_from) = t
+    fmt="""   <Placemark id="spider_%d">
+    <name>short walk %d</name>
+     <styleUrl>#spiderStyle</styleUrl>
+     <LineString>
+       <tessellate>1</tessellate>
+       <coordinates>%f,%f,0 %f,%f,0</coordinates>
+     </LineString>
+    </Placemark>"""
+    print fmt % (id, id, loc_from[0], loc_from[1], loc_to[0], loc_to[1])
+
+def show_placemark_linestring(nhops, coords):
+    print """ <Placemark id="route1">
+    <name>"""+str(nhops)+""" hops</name>
+      <styleUrl>#trPathStyle</styleUrl>
+      <LineString>
+        <tessellate>1</tessellate>
+          <coordinates>"""+coords+"""</coordinates>
+     </LineString>
+   </Placemark>"""
+
+def show_placemark_hop(hdesc):
+    if DEBUG:
+        print hdesc
+        return
+
+    # --- If keys don't exist then return ---
+    if (not 'addr' in hdesc):
+        return
+    if hdesc['addr'] == hdesc['hostname']:
+        hdesc['host_disp'] = hdesc['addr']
+    else:
+        hdesc['host_disp'] = "%s / %s" % (hdesc['hostname'], hdesc['addr'])
+    # format the Round Trip Times
+    rtts = ""
+    for r in hdesc['rtts']:
+        rtts += str(r)+','
+    hdesc['rtts_disp'] = rtts[:-1]
+
+#    if a_info['certainty'].isdigit():
+#        lat_digits = len(a_info['lat']) - a_info['lat'].find('.') - 1
+#        long_digits = len(a_info['long']) - a_info['long'].find('.') - 1
+#        if lat_digits >= 5 or long_digits >= 5:
+#            geo_precision = 'building level'
+#        elif lat_digits <= 2 or long_digits <= 2:
+#            geo_precision = 'city level'
+#        else:
+#            geo_precision = 'postal code level'         #don't know if this condition will ever occur...
+#    else:
+#        geo_precision = 'Maxmind'
+
+
+    # # --- Determine whether this should have an image associated with it,
+    #       or just a colour.  ---
+    # if (hdesc['ch_id']):
+        # urlStyle = "#ch_%(ch_id)s"
+    # else:
+        # urlStyle = "#%(ixclass)s"
+
+    urlStyle = "#%(ixclass)s"
+
+
+    nsa_sentence = ''
+    nsa_src = ''
+
+    if hdesc['nsa_src'] == "http://cryptome.org/klein-decl.htm": 
+        nsa_src = hdesc['nsa_src'] + "<br /><br />"
+        nsa_sentence = """According to AT&T network engineer Marc Klein,
+        San Francisco, Seattle, San Jose, Los Angeles and San Diego
+        have been identified as cities where AT&T installed NSA
+        eavesdropping equipment.<br /><br />"""
+
+    elif hdesc['nsa_src']:
+        nsa_sentence += "The following source has identified this as a likely \
+        location for NSA eavesdropping equipment:<br /><br />"
+        nsa_src = hdesc['nsa_src'] + "<br /><br />"
+
+
+
+    #FIXME: show pcode (if N.A.), area_code (if US), dma_code (if US)
+    #this is for CHs
+    fmt_main = """   <Placemark id="hop_%(hop)d">
+    <name>%(ixp)s</name>
+    <Snippet maxLines="0"></Snippet>
+    <styleUrl>""" + urlStyle + """</styleUrl>
+    <Point>
+        <coordinates>%(long)s,%(lat)s,0</coordinates>
+    </Point>"""
+
+    #this is for other
+    fmt_description = "        <![CDATA["  + \
+    nsa_sentence + nsa_src + \
+    """   <font size="5"><b>%(city)s</b><br/>
+    %(region)s, %(country)s</font><br/>
+    <br/><br/>
+    hop: %(hop)d </br>
+    AS: %(asnum)s </br>
+    name/ip: %(host_disp)s  <br/>
+    lat: %(lat)s, long: %(long)s<br/>"""
+
+
+    if (hdesc['image']):
+        fmt_image = """<img src="%(image)s" /> ]]>"""
+    else:
+        fmt_image = "]]>"
+
+    fmt_footer = """    </Placemark>\n"""
+    print fmt_main        % hdesc
+    print "        <description>" ,
+    print fmt_description % hdesc
+    print fmt_image       % hdesc
+    print "        </description>"
+    print fmt_footer      % hdesc
+
+def show_overlay (hdesc):
+
+    if 'lat' in hdesc and 'long' in hdesc:
+        lat = float(hdesc['lat'])
+        lon = float(hdesc['long'])
+    else:
+        lat = 0
+        lon = 0
+
+    # --- Extract distance ---
+    conn = DBConnect.getConnection()
+    all_chotels = CHotels(conn)
+    nearby_chotels = all_chotels.all_within (lon, lat,
+        MAX_CHOTEL_DIST)
+
+    # print "Hop", hdesc['hop']
+    # print "(", lat, ",", lon, ")"
+    # print
+
+    if is_accurate_to (5, lat) and is_accurate_to (5, lon):
+        radius = .020
+
+    elif nearby_chotels != []:
+        chotel_ll = (nearby_chotels[-1]['lat'], nearby_chotels[-1]['long'])
+
+        placemark = (lat, lon)
+
+        radius = ll_line_to_km (placemark,
+                                chotel_ll)
+    else:
+        radius = .5
+    
+    # print "nearby_chotels:", len(nearby_chotels)
+    # print "(placemark, chotel_ll):", placemark, chotel_ll
+    # print "radius:", radius
+
+    (lat_rad, lon_rad) = km_to_degrees (radius, lat)
+
+    # if hdesc['ch_id']:
+        # (lat_rad, lon_rad) = km_to_degrees (1.5, lat)
+    # else:
+        # (lat_rad, lon_rad) = km_to_degrees (0.5, lat)
+
+    fmt_overlay ="""
+  <GroundOverlay>
+    <name>Overlay (""" + str(lat) + ", " + str(lon) + """)  </name>
+    <color>ffffffff</color>
+    <Icon>
+      <href>""" + URL_HOME + """/ge/ellipse-150x150-70.png</href>
+    </Icon>
+    <LatLonBox>
+      <north>""" + str(lat-lat_rad) + """</north>
+      <east>""" + str(lon-lon_rad) + """</east>
+      
+      <south>""" + str(lat+lat_rad) + """</south>
+      <west>""" + str(lon+lon_rad) + """</west>
+      
+      <rotation>0</rotation>
+    </LatLonBox>
+  </GroundOverlay>
+  """
+
+    print fmt_overlay
+
+
+def show_placemark_ch(ch):
+    # nsa_sentence = """Due to the limitations of the free Maxmind geolocation
+    # database we have continued the red line of the
+    # traceroute--changing it to an orange line to the nearest carrier
+    # hotel internet exchange point.<br /><br />"""
+    nsa_sentence = ''
+
+    nsa_src = ''
+
+    if ch['nsa_src'] == "http://cryptome.org/klein-decl.htm":
+        nsa_src = ch['nsa_src'] + "<br /><br />"
+        nsa_sentence += "According to AT&T network engineer Marc Klein, San \
+Francisco, Seattle, San Jose, Los Angeles and San Diego have been identified \
+as cities where AT&T installed NSA eavesdropping equipment.<br /><br />"
+
+    elif ch['nsa_src']:
+        nsa_sentence += "The following source has identified this as a likely \
+        location for NSA eavesdropping equipment:<br /><br />"
+        nsa_src = ch['nsa_src'] + "<br /><br />"
+
+    fmt="""   <Placemark id="ch_hop_%(id)d">
+    <name>%(address)s </name>
+    <Snippet maxLines="0"></Snippet>
+<description><![CDATA[""" + nsa_sentence + nsa_src + \
+"""<!-- <b>%(address)s</b><br /><br /> -->\n"""
+
+    if ch['type'] == 'CH':
+        fmt += "Carrier Hotel <br/><br/>"
+
+
+    #"""Operator: %(ch_operator)s<br/>
+    fmt += """Building owner: %(ch_build_owner)s<br/>
+Operator/Ownership source: %(ch_operator_src)s  %(ch_build_owner_src)s<br/>
+<img src="%(image)s" />
+<br/>]]></description>
+    <styleUrl>#ch_%(id)s</styleUrl>
+    <Point>
+        <coordinates>%(long)s,%(lat)s,0</coordinates>
+    </Point>
+    </Placemark>\n"""
+    print fmt % ch
+
+
+# Networks: %(networks)s<br>			removed until information is updated, less cluttered
+# Networks source: %(isp_src)s<br/>
+
+
+def within(point1, point2, dist):
+    dx = point2[0] - point1[0]
+    dy = point2[1] - point1[1]
+    dist_squared = dx*dx + dy*dy
+    return dist_squared < dist*dist
+
+def is_valid_coord(longitude, latitude):
+    """Reject invalid coordinates too close to "placeholder" coordinates.
+    
+    These are: 0,0  in Atlantic off of Africa
+               -95,60  near shore of Hudson's Bay, used by MaxMind for unknown in Canada
+               -97.38  a field in Kansas, used by MaxMind for unknown in US"""
+
+    bad_coords = [(0.0,0.0), (-95.0,60.0), (-97.0,38.0)]
+    point2=(float(longitude), float(latitude))
+    for c in bad_coords:
+        if within(c, point2, 0.0001):
+            return False
+    return True
+
+# def show_nsa_listening_posts (conn=None):
+    # # select * from chotel where nsa like 'Y%';
+
+    # if not conn:
+        # conn = DBConnect.getConnection()
+
+    # qres = conn.query ("select * from chotel where nsa like 'Y%'")
+
+    # print "show.nsa.listening.posts:", 
+
+    # print qres.dictresult()
+
+    # print """
+    # <Placemark id="nsa_1">
+        # <name>%(qres)s</name>
+        # <Snippet maxLines="0"></Snippet>
+        # <styleUrl>#OTH</styleUrl>
+        # <Point>
+            # <coordinates>-119.619,34.4412,0</coordinates>
+        # </Point>
+            # <description>         <![CDATA[    name/ip/as/ms: www.westmont.edu / 64.136.190.130 AS209 / 94,93,94,94 ms<br/>
+        # lat: 34.4412, long: -119.619, hop: 12<br/>
+        # country: US<br/>
+        # region: <br/>
+        # city: <br/>
+    # ]]>
+            # </description>
+        # </Placemark>
+    # """        
+
+
+
+form = cgi.FieldStorage()
+idlist = 0 # REMOVE LINE?
+# traceroute_id = [783, 1707, 3206, 3292, 4534]
+traceroute_id_strings = []
+
+try:
+    traceroute_id_strings = form.getlist("traceroute_id")
+    are_nsa_listening_posts_visible = form.getfirst("show_nsa_listening_posts")
+except TypeError:
+    if __name__ != '__main__':
+        traceroute_id_strings = []
+    else:
+        traceroute_id_strings = []
+
+if are_nsa_listening_posts_visible == "true":
+    are_nsa_listening_posts_visible = True
+else:
+    are_nsa_listening_posts_visible = False
+
+are_nsa_listening_posts_visible = True
+
+traceroute_id = []
+for trid in traceroute_id_strings:
+    traceroute_id.append (int(trid))
+
+conn = DBConnect.getConnection()
+all_chotels = CHotels(conn)
+
+
+if DEBUG:
+    print "Content-Type: text/plain"
+    print
+else:
+    if traceroute_id:
+        print 'Content-Disposition: inline; filename="IXmaps_GE%d.kml"' % traceroute_id[idlist]
+    else:
+        print 'Content-Disposition: inline; filename="IXmaps_GE.kml"'
+    print "Content-Type: application/vnd.google-earth.kml+xml; charset=UTF-8"
+    print
+
+print kml_header
+print_hop_styles()
+print kml_camera
+
+if are_nsa_listening_posts_visible:
+    all_chotels.nsa(set_to_render=True)
+
+for idlist in range(len(traceroute_id)):
+
+    tr_header = get_traceroute(conn, traceroute_id[idlist])
+    # print "--- tr_header ---", tr_header
+    tr_body = get_tr_items(conn, traceroute_id[idlist])
+    # print "--- tr_body ---", tr_body
+
+    proximities = Proximities()
+    if DEBUG:
+        print tr_body
+    nhops = get_available_hops(tr_body)
+    # if nhops < 1:
+        # print "Content-Type: text/plain"
+        # print
+        # print "no data"
+
+
+    if DEBUG:
+        print "nhops=", nhops
+    addrs = get_available_ip_addrs(tr_body, nhops)
+    if DEBUG:
+        print addrs
+    attempts = tr_header['attempts']
+    longs = [''] * nhops
+    lats = [''] * nhops
+    asnums = [''] * nhops
+    hostnames = [''] * nhops
+    countries = [''] * nhops
+    regions = [''] * nhops
+    cities = [''] * nhops
+    pcodes = [''] * nhops
+    area_codes = [''] * nhops
+    dma_codes = [''] * nhops
+    chotels = [None] * nhops
+
+    ixps = [''] * nhops
+    ixclass = ['OTH'] * nhops
+    coords = ''
+    count_coords = 0
+    for i in range(len(addrs)):
+        addr = addrs[i]
+        ai = get_ip_addr_info(conn, addr)
+        if DEBUG:
+            print ai
+        longs[i] = longitude = ai['long']
+
+        if longitude == 'None':
+            longs[i] = longitude = ''
+
+        lats[i] = latitude = ai['lat']
+        if latitude == 'None':
+            lats[i] = longitude = ''
+
+        asnums[i] = ai['asnum']
+        hostnames[i] = hostname = ai['hostname']
+        countries[i] = country = ai['country']
+        regions[i] = ai['region']
+        cities[i] = ai['city']
+        pcodes[i] = ai['pcode']
+        area_codes[i] = ai['area_code']
+        dma_codes[i] = ai['dma_code']
+        if len(longitude) > 0 and len(latitude) > 0:
+            if is_valid_coord(longitude, latitude):
+                coords += longitude+','+latitude+',0 '
+                count_coords += 1
+                # find nearest Carrier Hotel that's within a certain distance
+                chotels[i] = chotel = all_chotels.nearest(float(longitude), float(latitude), MAX_CHOTEL_DIST)
+
+                cHotels = all_chotels.all_within (float(longitude), float(latitude), MAX_CHOTEL_DIST)
+            else:
+                chotel = None
+                cHotels = {}
+
+            # guess whether or not we're in Canada
+            if country == 'CA':
+                ixclass[i] = 'CAN'
+
+            elif country == "Unknown":
+
+                # --- Check if it's in the Toronto-area
+                if (float(latitude) >= 43.5) and \
+                   (float(longitude) >= -81) and (float(longitude) <= -79):
+                    countries[i] = 'CA'
+                    ixclass[i] = "CAN"
+
+                # --- If North of most Northern US point, assume Canada ---
+                elif float(latitude) > 49.38:
+                    countries[i] = 'CA'
+                    ixclass[i] = "CAN"
+
+                # --- If inbetween US's North pt & Canada's south pt, assume unknown ---
+                elif float(latitude) > 41.67:
+                    ixclass[i] = "INT"
+                else:
+                    countries[i] = 'US'
+
+            lo = float(longitude)
+            la = float(latitude)
+
+            # guess whether we are at Folsom Street or another known NSA listening post
+            if chotel:
+                # The granularity of the MaxMind coordinates is 1/10000 of a degree of arc or about 11m
+                # in latitude and 11m/cos(lat) in longitude.  In practice, the closest match is about
+                # 50m, typically the nearest CH in urban areas is around 500m.  Therefore, always
+                # put the CH and hop locations on their own places with a spider connection line.
+
+                # ixclass[i] = get_ch_class(chotel)
+                chotel['ixclass'] = string.replace(ixclass[i], "near", "", 1)
+                chotel['to_render'] = True
+                get_ch_networks(conn, chotel)
+                proximities.add(i, (float(longitude), float(latitude)), (chotel['long'], chotel['lat']))
+
+            for cHotel in cHotels:
+                # ixclass[i] = get_ch_class(cHotel)
+                ixClass = get_ch_class(cHotel)
+                cHotel['ixclass'] = string.replace(ixClass, "near", "", 1)
+                cHotel['to_render'] = True
+
+                # print "cHotel['id']:", cHotel['id']
+                # print "cHotel['nsa']:", cHotel['nsa']
+                # print "cHotel['ch_build_owner']:", cHotel['ch_build_owner']
+                # print "cHotel['ixclass]:", cHotel['ixclass']
+                # print "--"
+
+                get_ch_networks(conn, cHotel)
+
+                # --- This line is for (obsolete)
+                # spider-mapping; we probably don't need it ---
+                # proximities.add(i, (float(longitude), float(latitude)), (chotel['long'], chotel['lat']))
+
+            # print "END LOOP\n"
+
+            # get the name to show for the facility
+            # eventually we want to say which building it is in
+            if len(hostname) > 0:
+                ixps[i] = hostname
+            else:
+                ixps[i] = addr
+
+    if count_coords >= 2:
+        if DEBUG:
+            print coords
+        else:
+            # show_placemark_linestring(nhops, coords)
+            pass
+    hdesc = [{}]
+    for i in range(len(addrs)):
+        hdesc.append({})
+        if addrs[i]:
+            hdesc[i]['hop'] = i
+            hdesc[i]['addr'] = addrs[i]
+            hdesc[i]['long'] = longs[i]
+            hdesc[i]['lat'] = lats[i]
+            hdesc[i]['asnum'] = asnums[i]
+            hdesc[i]['hostname'] = hostnames[i]
+            hdesc[i]['country'] = countries[i]
+            hdesc[i]['region'] = regions[i]
+            hdesc[i]['city'] = cities[i]
+            hdesc[i]['pcode'] = pcodes[i]
+            hdesc[i]['area_code'] = area_codes[i]
+            hdesc[i]['dma_code'] = dma_codes[i]
+            hdesc[i]['ixp'] = ixps[i]
+            hdesc[i]['ixclass'] = ixclass[i]
+            hdesc[i]['rtts'] = get_rtts(tr_body, i+1, attempts)
+
+            # try:
+                # hdesc[i]['chotel'] = chotel = all_chotels.nearest (float(hdesc[i]['long']),
+                                                                   # float(hdesc[i]['lat']), MAX_CHOTEL_DIST)
+            # except ValueError:
+                # pass
+            # if chotel:
+
+            # if chotels[i]:
+                # hdesc[i]['image'] = chotels[i]['image']
+                # hdesc[i]['ch_id'] = chotels[i]['id']
+                # hdesc[i]['nsa_src'] = chotels[i]['nsa_src']
+            # else:
+                # hdesc[i]['image'] = None
+                # hdesc[i]['ch_id'] = None
+                # hdesc[i]['nsa_src'] = None
+
+            hdesc[i]['image'] = None
+            hdesc[i]['ch_id'] = None
+            hdesc[i]['nsa_src'] = None
+
+
+
+    print """
+        <Folder>
+            <visibility>0</visibility>
+            <styleUrl>#ixFolderStyle</styleUrl>
+            <name>Rt """ \
+        + str(traceroute_id[idlist]) + " (" + hostnames[len(addrs)-1] + \
+          """) </name>
+            <open>0</open>
+            <Snippet>""" + str(nhops) + """ hops</Snippet>
+            <description><![CDATA[
+            <table>
+                <tr>
+                    <th>
+                        Hop </th> 
+                    <th>
+                        Lat </th>
+                    <th>
+                        Long </th>
+                    <th>
+                        Hostname </th>
+                </tr>
+            """
+
+    for aa in range(len(addrs)):    
+        if addrs[aa]:
+            print """
+                <tr>
+                <td nowrap="nowrap">%(hop)s</td>
+                <td nowrap="nowrap">%(lat)s&nbsp;</td>
+                <td nowrap="nowrap">%(long)s</td>
+                <td nowrap="nowrap">%(hostname)s&nbsp;</td>
+                </tr> """ % hdesc[aa]
+
+    print """ 
+            </table>
+            ]]></description> \n """
+
+    show_placemark_linestring(nhops, coords)
+
+    last_coord = None
+
+    for i in range (len(addrs)):
+        show_placemark_hop(hdesc[i])
+
+    print """<Folder>
+         <visibility>1</visibility>
+         <styleUrl>#ixFolderStyle</styleUrl>
+         <name>Carrier hotel vicinity</name>"""
+    for i in range (len(addrs)):
+        coord = get_lat_long(hdesc[i])
+#        if coord != last_coord:
+#            show_overlay (hdesc[i])
+        last_coord = coord
+
+    print "</Folder>"
+    print "</Folder>"
+
+# {
+
+print """<Folder>
+         <visibility>1</visibility>
+         <styleUrl>#ixFolderStyle</styleUrl>
+         <name>NSA (and Carrier Hotels/Google Data Centers on route)</name>"""
+
+all_chotels.reset()
+for ch in all_chotels:
+    print_ch_style (ch)
+
+all_chotels.reset()
+# print "len(all_chotels.chotels):" , len(all_chotels.chotels)
+# print "all_chotels.chotels:" , all_chotels.chotels
+for ch in all_chotels:
+    # print "ch:", ch
+    show_placemark_ch(ch)
+
+# for px in proximities:
+    # show_spider(px)
+
+# --- Query for NSA ---
+# select * from chotel where type = 'NSA' and nsa = 'A'
+# select * from chotel where type = 'NSA' and nsa = 'B'
+# select * from chotel where type = 'NSA' and nsa = 'C'
+# select * from chotel where type = 'NSA' and nsa = 'D'
+# select * from chotel where type = 'Google'
+# select * from chotel where type = 'CH'
+# select * from chotel where type = 'CH' and ch_build_owner like '%Carlyle%'
+
+print "</Folder>"
+
+# }
+
+print kml_trailer
