@@ -153,7 +153,7 @@ query_types = {
         header = """<table border="0" width="100%%">
           <tr>
             <td>
-              <b>Traceroute&nbsp;details:</b>&nbsp;ID&nbsp;%s&nbsp;created&nbsp;on&nbsp;%s
+              <b><i>Traceroute&nbsp;details:</i></b><span style="font-size:20px">&nbsp;ID&nbsp;%s</span>&nbsp;created&nbsp;on&nbsp;%s
             </td>
             <td>
               <a href="./ge-render.cgi?traceroute_id=%s"></a>
@@ -161,12 +161,12 @@ query_types = {
           </tr>
           <tr>
             <td>
-              <b>Origin:</b>&nbsp;Submitted&nbsp;by&nbsp;%s&nbsp;from&nbsp;%s
+              <b><i>Origin:</i></b>&nbsp;Submitted&nbsp;by&nbsp;%s&nbsp;from&nbsp;%s
             </td>
           </tr>
           <tr>
             <td>
-              <b>Destination:</b>&nbsp;<a href=http://%s target="_blank">%s</a> [%s]
+              <b><i>Destination:</i></b>&nbsp;<a href=http://%s target="_blank">%s</a> [%s]
             </td>
           </tr>
         </table>
@@ -213,46 +213,22 @@ query_types = {
 
         header = """<table border="0" width="100%%">
           <tr>
-            <td width="1">Traceroute&nbsp;id:</td>
             <td>
-              <b>%s</b>
-            </td>
-            <td colspan="3" align="right"> <a href="./ge-render.cgi?traceroute_id=%s"></a> </td>
-          </tr>
-          <tr>
-            <td>
-              Origin:
+              <b><i>Traceroute&nbsp;details:</i></b><span style="font-size:20px">&nbsp;ID&nbsp;%s</span>&nbsp;created&nbsp;on&nbsp;%s
             </td>
             <td>
-              <b>%s</b>
-            </td>
-            <td width='1'>
-              Destination:
-            </td>
-            <td>
-              <b>%s</b> [%s]
-            </td>
-            <td width='150'>
-              &nbsp;
+              <a href="./ge-render.cgi?traceroute_id=%s"></a>
             </td>
           </tr>
           <tr>
             <td>
-              Submitted by:
+              <b><i>Origin:</i></b>&nbsp;Submitted&nbsp;by&nbsp;%s&nbsp;from&nbsp;%s
             </td>
+          </tr>
+          <tr>
             <td>
-              %s
+              <b><i>Destination:</i></b>&nbsp;<a href=http://%s target="_blank">%s</a> [%s]
             </td>
-            <td>
-              Submitted&nbsp;on:
-            </td>
-            <td>
-              %s
-            </td>
-            <td>
-              &nbsp;
-            </td>
-
           </tr>
         </table>
         <br />
