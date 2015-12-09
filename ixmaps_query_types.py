@@ -153,7 +153,7 @@ query_types = {
         header = """<table border="0" width="100%%">
           <tr>
             <td>
-              <b><i>Traceroute&nbsp;details:</i></b><span style="font-size:20px">&nbsp;ID&nbsp;%s</span>&nbsp;created&nbsp;on&nbsp;%s
+              <b><i>Traceroute&nbsp;details:</i></b><span>&nbsp;ID&nbsp;%s</span>&nbsp;created&nbsp;on&nbsp;%s
             </td>
             <td>
               <a href="./ge-render.cgi?traceroute_id=%s"></a>
