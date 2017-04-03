@@ -140,11 +140,10 @@ def main (query_type, arg):
         doc += html.tag("head")
         doc += html.tagged_text ("title", "IXmaps :: " + query_info.title)
 
-        doc += '<script src="/jquery-ui-1.10.1/js/jquery-1.9.1.js"></script>'
-        doc += '<script src="/jquery-ui-1.10.1/js/jquery-ui-1.10.1.custom.js"></script>'
-        doc += '<script type="text/javascript" src="/js/tr-detail.js"></script>'
-        doc += '<script type="text/javascript" src="/js/ixmaps.js"></script>'
-        doc += '<script type="text/javascript" src="/js/ixmaps.gm.js"></script>'
+        doc += '<script src="/_assets/js/jquery.min.js"></script>'
+        doc += '<script type="text/javascript" src="/_assets/js/tr-detail.js"></script>'
+        doc += '<script type="text/javascript" src="/_assets/js/gmaps.js"></script>'
+        #doc += '<script type="text/javascript" src="/js/ixmaps.gm.js"></script>'
         #doc += '<link rel="stylesheet" href="/css/ix.css" type="text/css" />'
         #doc += '<link rel="stylesheet" href="/css/ix-explore.css" type="text/css" />'
 
