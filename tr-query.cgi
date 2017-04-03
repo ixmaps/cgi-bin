@@ -136,12 +136,16 @@ def main (query_type, arg):
     if query_type:
         query_info = ixmaps_query_types.query_types[query_type]
 
-        doc += html.tag('html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"')
+
+        #doc += html.tag('html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"')
+        doc += '<!DOCTYPE html><html lang="en">'
         doc += html.tag("head")
         doc += html.tagged_text ("title", "IXmaps :: " + query_info.title)
 
         doc += '<script src="/_assets/js/jquery.min.js"></script>'
+        doc += '<script src="/_assets/__build/bower_components/jquery-toastmessage-plugin/src/main/javascript/jquery.toastmessage.js"></script>'
         doc += '<script type="text/javascript" src="/_assets/js/main.js"></script>'
+
         doc += '<script type="text/javascript" src="/_assets/js/tr-detail.js"></script>'
         doc += '<script type="text/javascript" src="/_assets/js/gmaps.js"></script>'
 
