@@ -136,9 +136,7 @@ def main (query_type, arg):
     if query_type:
         query_info = ixmaps_query_types.query_types[query_type]
 
-
-        #doc += html.tag('html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"')
-        doc += '<!DOCTYPE html><html lang="en">'
+        doc += html.tag('html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"')
         doc += html.tag("head")
         doc += html.tagged_text ("title", "IXmaps :: " + query_info.title)
 
