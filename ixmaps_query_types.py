@@ -188,7 +188,7 @@ query_types = {
             tr_item.ip_addr=ip_addr_info.ip_addr and asnum=num order
             by hop, attempt""",
 
-        generic_headers_link_to = "/faq.php#",
+        generic_headers_link_to = "/learn/glossary.php#",
 
         specific_headers_link_to = {
             #'Location' :    "http://maps.google.ca/",
