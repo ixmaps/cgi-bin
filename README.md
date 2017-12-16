@@ -1,4 +1,4 @@
-# Status
+## Status
 This repo is almost depricated. Currently only used for tr_details, which we are planning to rebuild in proper JS
 
 ## License
